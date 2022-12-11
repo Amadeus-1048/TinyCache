@@ -17,10 +17,10 @@ type entry struct {
 // Cache is an LRU cache. It is not safe for concurrent access.
 // 创建一个包含字典和双向链表的结构体类型 Cache，方便实现后续的增删查改操作
 type Cache struct {
-	maxBytes int64                    // 允许使用的最大内存
-	nbytes   int64                    // 当前已使用的内存
-	ll       *list.List               // 使用 Go 语言标准库实现的双向链表list.List
-	cache    map[string]*list.Element // 字典的定义是 map[string]*list.Element，键是字符串，值是双向链表中对应节点的指针
+	maxBytes  int64                    // 允许使用的最大内存
+	usedBytes int64                    // 当前已使用的内存
+	ll        *list.List               // 使用 Go 语言标准库实现的双向链表list.List
+	cache     map[string]*list.Element // 字典的定义是 map[string]*list.Element，键是字符串，值是双向链表中对应节点的指针
 	// optional and executed when an entry is purged.
 	OnEvicted func(key string, value Value) // 某条记录被移除时的回调函数，可以为 nil
 }
@@ -52,11 +52,14 @@ func (c *Cache) Get(key string) (value Value, ok bool) {
 // 这里的删除，实际上是缓存淘汰。即移除最近最少访问的节点（队首）
 func (c *Cache) RemoveOldest() {
 	ele := c.ll.Back() // 取到队首节点
-	kv := ele.Value.(*entry)
-	delete(c.cache, kv.key)                                // 从字典中 c.cache 删除该节点的映射关系
-	c.nbytes -= int64(len(kv.key)) + int64(kv.Value.Len()) // 更新当前所用的内存
-	if c.OnEvicted != nil {                                // 如果回调函数 OnEvicted 不为 nil，则调用回调函数
-		c.OnEvicted(kv.key, kv.Value)
+	if ele != nil {
+		c.ll.Remove(ele)                                          // 从队列 ll 中删去队首节点
+		kv := ele.Value.(*entry)                                  // 获取节点的值（*entry）
+		delete(c.cache, kv.key)                                   // 从字典中 c.cache 删除该节点的映射关系
+		c.usedBytes -= int64(len(kv.key)) + int64(kv.Value.Len()) // 更新当前所用的内存
+		if c.OnEvicted != nil {                                   // 如果回调函数 OnEvicted 不为 nil，则调用回调函数
+			c.OnEvicted(kv.key, kv.Value)
+		}
 	}
 }
 
@@ -65,15 +68,16 @@ func (c *Cache) Add(key string, value Value) {
 	if ele, ok := c.cache[key]; ok { // 如果键存在，则更新对应节点的值，并将该节点移到队尾
 		c.ll.MoveToFront(ele)
 		kv := ele.Value.(*entry)
-		c.nbytes += int64(value.Len()) - int64(kv.Value.Len())
+		// 这里是由于对key对应的value进行了修改，只有value的长度变化了
+		c.usedBytes += int64(value.Len()) - int64(kv.Value.Len())
 		kv.Value = value
 	} else { // 不存在则是新增场景
-		ele := c.ll.PushFront(&entry{key, value})        // 首先队尾添加新节点 &entry{key, value}
-		c.cache[key] = ele                               // 并字典中添加 key 和节点的映射关系
-		c.nbytes += int64(len(key)) + int64(value.Len()) // 更新 c.nbytes
+		ele := c.ll.PushFront(&entry{key, value})           // 首先队尾添加新节点 &entry{key, value}
+		c.cache[key] = ele                                  // 并字典中添加 key 和节点的映射关系
+		c.usedBytes += int64(len(key)) + int64(value.Len()) // 更新 c.usedBytes
 	}
 	// 如果超过了设定的最大值 c.maxBytes，则移除最少访问的节点
-	for c.maxBytes != 0 && c.maxBytes < c.nbytes {
+	for c.maxBytes != 0 && c.maxBytes < c.usedBytes {
 		c.RemoveOldest()
 	}
 }
